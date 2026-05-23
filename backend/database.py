@@ -1,5 +1,5 @@
-from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, ForeignKey
 from datetime import datetime
 import uuid
 import random
@@ -15,10 +15,11 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 def generate_tracking_code():
-    # E.g., BEYAZ-X8F2
+    # E.g., BEYAZ-20231024-X8F2A1
+    date_str = datetime.now().strftime("%Y%m%d")
     chars = string.ascii_uppercase + string.digits
-    random_str = ''.join(random.choices(chars, k=4))
-    return f"BEYAZ-{random_str}"
+    random_str = ''.join(random.choices(chars, k=6))
+    return f"BEYAZ-{date_str}-{random_str}"
 
 class Complaint(Base):
     __tablename__ = "complaints"
@@ -37,6 +38,22 @@ class Complaint(Base):
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     image_url = Column(String, nullable=True)
+    
+    reporter_name = Column(String, default="Anonim")
+    reporter_phone = Column(String, nullable=True)
+    
+    notes = relationship("Note", back_populates="complaint", cascade="all, delete-orphan")
+
+class Note(Base):
+    __tablename__ = "notes"
+
+    id = Column(String, primary_key=True, index=True, default=lambda: str(uuid.uuid4()))
+    complaint_id = Column(String, ForeignKey("complaints.id"))
+    author = Column(String)
+    text = Column(String)
+    created_at = Column(DateTime, default=datetime.now)
+
+    complaint = relationship("Complaint", back_populates="notes")
 
 Base.metadata.create_all(bind=engine)
 

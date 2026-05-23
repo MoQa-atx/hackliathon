@@ -2,11 +2,6 @@ fastapi
 uvicorn
 python-multipart
 pydantic
-numpy
-opencv-python
-mediapipe
 sqlalchemy
-# Sonradan vakit kalirsa eklenecekler:
-# transformers
-# torch
-# pillow
+python-dotenv
+requests

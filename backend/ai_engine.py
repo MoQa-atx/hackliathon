@@ -1,9 +1,7 @@
-import random
-import numpy as np
-import cv2
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+import os
+import json
+import base64
+import requests
 from pydantic import BaseModel
 
 class AIResult(BaseModel):
@@ -16,143 +14,126 @@ class AIResult(BaseModel):
 
 class AIEngine:
     def __init__(self):
-        # MediaPipe Nesne Tanıma Modelini Yükle (Sadece 4 MB)
-        base_options = python.BaseOptions(model_asset_path='efficientdet_lite0.tflite')
-        options = vision.ObjectDetectorOptions(base_options=base_options, score_threshold=0.35)
-        self.detector = vision.ObjectDetector.create_from_options(options)
-
-        self.scenarios = [
-            {
-                "issue": "Kopmuş Elektrik Teli / Açık Kablo",
-                "department": "Elektrik-Elektronik / İtfaiye",
-                "urgency": "Kırmızı Kod",
-                "risk": 95,
-            },
-            {
-                "issue": "Derin Yol Çukuru",
-                "department": "Fen İşleri",
-                "urgency": "Kırmızı Kod",
-                "risk": 85,
-            },
-            {
-                "issue": "Kırılmış Park Bankı",
-                "department": "Park ve Bahçeler",
-                "urgency": "Sarı Kod",
-                "risk": 60,
-            },
-            {
-                "issue": "Taşmış Çöp Kutusu / Evsel Atık",
-                "department": "Temizlik İşleri",
-                "urgency": "Sarı Kod",
-                "risk": 45,
-            },
-            {
-                "issue": "Uzamış Çimler",
-                "department": "Park ve Bahçeler",
-                "urgency": "Yeşil Kod",
-                "risk": 20,
-            }
-        ]
+        # Gemini REST API'yi dogrudan kullaniyoruz (Bagimliliklari hafifletmek icin)
+        self.api_key = os.environ.get("GEMINI_API_KEY")
+        self.model_name = "gemini-2.5-flash"
+        
+        if self.api_key:
+            self.url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        else:
+            print("WARNING: GEMINI_API_KEY bulunamadi. Sistem demo/mock modunda calisacak.")
 
     def analyze_image(self, file_bytes: bytes, file_name: str, description: str = "") -> AIResult:
-        # Gelen byte verisini OpenCV formatına çevir
-        nparr = np.frombuffer(file_bytes, np.uint8)
-        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        is_spam = False
-        spam_confidence = 0.0
-
-        if img_np is not None:
-            # OpenCV (BGR) formatını RGB'ye çevirip MediaPipe Image'ına dönüştür
-            rgb_img = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_img)
-
-            # Modeli çalıştır
-            detection_result = self.detector.detect(mp_image)
-
-            # Spam olarak kabul edilecek yasaklı nesneler (COCO Dataset etiketleri)
-            spam_labels = ["person", "cat", "dog", "teddy bear", "pizza", "donut", "cake"]
-            
-            # Şikayet eşleştirme için aranacak nesneler
-            bench_labels = ["bench", "chair"]
-            trash_labels = ["bottle", "cup", "bowl", "wine glass", "fork", "knife", "spoon"]
-            
-            detected_bench = False
-            detected_trash = False
-
-            for detection in detection_result.detections:
-                for category in detection.categories:
-                    cat_name = category.category_name.lower()
-                    if cat_name in spam_labels:
-                        is_spam = True
-                        spam_confidence = category.score
-                        break
-                    elif cat_name in bench_labels:
-                        detected_bench = True
-                    elif cat_name in trash_labels:
-                        detected_trash = True
-                if is_spam:
-                    break
-
-        # Eğer spam bir nesne bulunduysa (örn: Selfie veya Kedi) direkt reddet
-        if is_spam:
+        if not self.api_key or self.api_key == "your_gemini_api_key_here":
+            # API anahtari yoksa hata dondurmek yerine eski mock sistemin basit halini verelim
             return AIResult(
-                confidence_score=spam_confidence,
-                detected_issue="Alakasız Nesne Tespit Edildi (Troll/Spam)",
-                department="Yok",
+                confidence_score=0.9,
+                detected_issue="API Key Eksik (Mock Veri)",
+                department="Sistem Yonetimi",
+                urgency_code="Sari Kod",
+                risk_score=50,
+                is_spam=False
+            )
+
+        # Goruntuyu base64'e cevir
+        image_b64 = base64.b64encode(file_bytes).decode('utf-8')
+        
+        # Mime Type belirle
+        mime_type = "image/jpeg"
+        if file_name.lower().endswith(".png"):
+            mime_type = "image/png"
+        elif file_name.lower().endswith(".webp"):
+            mime_type = "image/webp"
+
+        prompt = f"""
+        Analyze this citizen complaint image and description submitted to local city services in Turkey.
+
+        Citizen's Description: "{description}"
+
+        CRITICAL RULE: ALL text output values (detected_issue, department) MUST be written in TURKISH language. Never use English for these fields.
+
+        TASKS:
+        1. Check if the image relates to a VALID MUNICIPAL COMPLAINT (e.g. garbage, road damage, broken power line, broken bench, stray animal injury, water leak, etc.).
+        2. If the image is IRRELEVANT (selfie, food, indoor furniture, internet meme, ordinary pet photos without any problem, random doodles, etc.), mark it as SPAM (is_spam: true).
+        3. If the complaint is valid, determine:
+           - detected_issue: The problem in Turkish (e.g. "Yol Çökmesi", "Kırık Bank", "Su Borusu Patlaması", "Çöp Birikintisi")
+           - department: The responsible department in Turkish (e.g. "Fen İşleri", "Temizlik İşleri", "Park ve Bahçeler")
+           - urgency_code: One of "Kırmızı Kod", "Sarı Kod", "Yeşil Kod"
+           - risk_score: 0-100, increasing with severity (exposed electrical wiring > 90, overgrown grass < 30)
+
+        Department examples: Fen İşleri, Temizlik İşleri, Park ve Bahçeler, Zabıta, Çevre Koruma, Ulaşım, Veteriner İşleri, Su ve Kanalizasyon.
+
+        Return ONLY the JSON matching the schema below.
+        """
+
+        # Gemini REST Payload for Structured Output
+        payload = {
+            "contents": [{
+                "parts": [
+                    {
+                        "inlineData": {
+                            "mimeType": mime_type,
+                            "data": image_b64
+                        }
+                    },
+                    {
+                        "text": prompt
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "confidence_score": {"type": "NUMBER", "description": "Confidence score of the analysis (0.0 to 1.0)"},
+                        "detected_issue": {"type": "STRING", "description": "The main issue detected, MUST be in Turkish (e.g. Yol Çökmesi, Kırık Bank, Çöp Birikintisi)"},
+                        "department": {"type": "STRING", "description": "The city department to route to, MUST be in Turkish (e.g. Fen İşleri, Temizlik İşleri, Park ve Bahçeler)"},
+                        "urgency_code": {"type": "STRING", "description": "Urgency code: must be one of 'Kırmızı Kod', 'Sarı Kod', or 'Yeşil Kod'"},
+                        "risk_score": {"type": "INTEGER", "description": "Risk score between 0 and 100"},
+                        "is_spam": {"type": "BOOLEAN", "description": "Set true if the image is not a real complaint (troll, irrelevant, spam)"}
+                    },
+                    "required": ["confidence_score", "detected_issue", "department", "urgency_code", "risk_score", "is_spam"]
+                }
+            }
+        }
+
+        try:
+            headers = {'Content-Type': 'application/json'}
+            response = requests.post(self.url, json=payload, headers=headers)
+            
+            if response.status_code != 200:
+                print(f"Gemini API Hata Kodu: {response.status_code}")
+                print(f"Gemini API Hata Detayı: {response.text}")
+                # Hata durumunda spam döndürerek sistemin çökmesini engelle
+                return AIResult(
+                    confidence_score=0.0,
+                    detected_issue="API Bağlantı Hatası",
+                    department="Yok",
+                    urgency_code="Bilinmiyor",
+                    risk_score=0,
+                    is_spam=True
+                )
+                
+            data = response.json()
+            # JSON çıktısını al
+            result_text = data['candidates'][0]['content']['parts'][0]['text']
+            
+            # Text olarak gelen JSON'ı Parse et
+            result_json = json.loads(result_text)
+            
+            return AIResult(**result_json)
+            
+        except Exception as e:
+            print(f"Beklenmeyen Hata: {e}")
+            return AIResult(
+                confidence_score=0.0,
+                detected_issue="Sunucu Taraflı Hata",
+                department="Destek",
                 urgency_code="Bilinmiyor",
                 risk_score=0,
                 is_spam=True
             )
-
-        confidence = random.uniform(0.75, 0.98)
-        selected_scenario = None
-
-        # TAMAMEN GÖRÜNTÜ İŞLEME (Text'e bakmak yok)
-        if img_np is not None:
-            # OpenCV ile Renk Analizi
-            hsv_img = cv2.cvtColor(img_np, cv2.COLOR_BGR2HSV)
-            
-            # Yeşil renk (Çim tespiti için)
-            lower_green = np.array([35, 40, 40])
-            upper_green = np.array([85, 255, 255])
-            green_mask = cv2.inRange(hsv_img, lower_green, upper_green)
-            green_ratio = cv2.countNonZero(green_mask) / (img_np.shape[0] * img_np.shape[1])
-            
-            # Gri/Koyu renk (Asfalt ve Çukur tespiti için)
-            lower_gray = np.array([0, 0, 0])
-            upper_gray = np.array([180, 50, 80])
-            gray_mask = cv2.inRange(hsv_img, lower_gray, upper_gray)
-            gray_ratio = cv2.countNonZero(gray_mask) / (img_np.shape[0] * img_np.shape[1])
-
-            # Öncelikli tespitler
-            if detected_bench:
-                selected_scenario = self.scenarios[2] # Bank
-            elif detected_trash:
-                selected_scenario = self.scenarios[3] # Çöp
-            elif green_ratio > 0.15: # Eğer resmin %15'inden fazlası yeşilse
-                selected_scenario = self.scenarios[4] # Çimler
-            elif gray_ratio > 0.35: # Eğer resmin %35'inden fazlası asfalt/koyu ise
-                selected_scenario = self.scenarios[1] # Çukur
-            else:
-                # Geriye kalan senaryoyu "Kablo" veya "Genel" atayabiliriz
-                selected_scenario = self.scenarios[0] # Kopmuş Kablo
-                
-        if not selected_scenario:
-            selected_scenario = {
-                "issue": "Genel Şikayet / Sınıflandırılamadı",
-                "department": "Beyaz Masa / Destek Hizmetleri",
-                "urgency": "Yeşil Kod",
-                "risk": 10,
-            }
-
-        return AIResult(
-            confidence_score=confidence,
-            detected_issue=selected_scenario["issue"],
-            department=selected_scenario["department"],
-            urgency_code=selected_scenario["urgency"],
-            risk_score=selected_scenario["risk"],
-            is_spam=False
-        )
 
 engine = AIEngine()
